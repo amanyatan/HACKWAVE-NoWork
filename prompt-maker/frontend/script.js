@@ -208,6 +208,7 @@ const MIC_ON = 0.015; // RMS above this counts as speech
 const mic = { loudRun: 0, spoke: false, quietSince: 0 };
 const origConvert = AudioStreamer.prototype.convertToPCM16;
 AudioStreamer.prototype.convertToPCM16 = function (samples) {
+  if (!VoiceLock.pass(samples)) samples = new Float32Array(samples.length); // someone else is talking: send silence
   let sum = 0;
   for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
   onMicLevel(Math.sqrt(sum / samples.length));
@@ -361,3 +362,36 @@ el.mic.onclick = () => {
     start();
   }
 };
+
+// Voice lock buttons: record once, then the agent only hears the owner.
+(() => {
+  const btn = $("lockBtn"), redo = $("lockReset");
+  const paint = () => {
+    const has = !!VoiceLock.profile;
+    btn.textContent = !has ? "Lock my voice" : VoiceLock.enabled ? "Voice lock: on" : "Voice lock: off";
+    btn.classList.toggle("on", VoiceLock.enabled);
+    redo.hidden = !has;
+  };
+  const record = async () => {
+    btn.disabled = redo.disabled = true;
+    setStatus("Say anything in your normal voice for about 12 seconds…");
+    try {
+      await VoiceLock.enroll((p) => setStatus(`Listening to your voice… ${Math.round(p * 100)}%`));
+      setStatus("Voice locked. Only your voice will be heard.");
+    } catch (e) {
+      const denied = e && e.name === "NotAllowedError";
+      setStatus(denied ? "Microphone access denied. Allow the mic and try again." : `Could not lock your voice: ${e.message}`, true);
+    }
+    btn.disabled = redo.disabled = false;
+    paint();
+  };
+  btn.onclick = () => {
+    if (state.live) return setStatus("Stop the conversation first, then set up voice lock.", true);
+    if (!VoiceLock.profile) return record();
+    VoiceLock.setEnabled(!VoiceLock.enabled);
+    paint();
+  };
+  redo.onclick = () => (state.live ? setStatus("Stop the conversation first.", true) : record());
+  VoiceLock.onChange = (who) => state.live && setStatus(who === "other" ? "Another voice detected. Ignoring it." : "Back to your voice.");
+  paint();
+})();
