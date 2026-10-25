@@ -238,3 +238,87 @@ async def test_zip_rejects_duplicates_and_empty(aiohttp_client):
     assert (await c.post("/api/zip", json={"files": dup})).status == 400
     assert (await c.post("/api/zip", json={"files": []})).status == 400
     assert (await c.post("/api/zip", json={})).status == 400
+
+
+SITE = [
+    {"path": "index.html", "content": "<html><head><title>T</title></head><body><link rel=stylesheet href=style.css></body></html>"},
+    {"path": "style.css", "content": "body{color:red}"},
+    {"path": "script.js", "content": "console.log(1)"},
+]
+
+
+async def make_preview(c, files=SITE, token=None):
+    body = {"files": files, **({"token": token} if token else {})}
+    r = await c.post("/api/preview", json=body)
+    return r.status, await r.json()
+
+
+async def test_preview_serves_the_project_as_a_site(aiohttp_client):
+    c = await client_for(aiohttp_client)
+    status, body = await make_preview(c)
+    assert status == 200
+    token = body["token"]
+    page = await c.get(f"/p/{token}/")
+    assert page.status == 200 and "text/html" in page.headers["Content-Type"]
+    assert "<title>T</title>" in await page.text()
+    css = await c.get(f"/p/{token}/style.css")
+    assert css.headers["Content-Type"].startswith("text/css") and await css.text() == "body{color:red}"
+    assert "javascript" in (await c.get(f"/p/{token}/script.js")).headers["Content-Type"]
+    assert "default-src 'self'" in page.headers["Content-Security-Policy"]
+    assert "sandbox" not in page.headers["Content-Security-Policy"]  # 127.0.0.1 is the loopback pair the Code page swaps to
+    assert page.headers["X-Content-Type-Options"] == "nosniff" and page.headers["Cache-Control"] == "no-store"
+
+
+async def test_preview_without_trailing_slash_redirects(aiohttp_client):
+    c = await client_for(aiohttp_client)
+    token = (await make_preview(c))[1]["token"]
+    r = await c.get(f"/p/{token}", allow_redirects=False)
+    assert r.status == 302 and r.headers["Location"] == f"/p/{token}/"
+
+
+async def test_preview_unknown_token_or_file_is_404(aiohttp_client):
+    c = await client_for(aiohttp_client)
+    token = (await make_preview(c))[1]["token"]
+    assert (await c.get("/p/nope/")).status == 404
+    assert (await c.get(f"/p/{token}/missing.js")).status == 404
+    assert (await c.get(f"/p/{token}/../x")).status in (400, 404)
+
+
+async def test_preview_token_reuse_updates_in_place(aiohttp_client):
+    c = await client_for(aiohttp_client)
+    token = (await make_preview(c))[1]["token"]
+    edited = [{"path": "index.html", "content": "<h1>EDITED</h1>"}]
+    assert (await make_preview(c, edited, token))[1]["token"] == token
+    assert "EDITED" in await (await c.get(f"/p/{token}/")).text()
+    # a token the server never issued is not accepted: a fresh one is created instead
+    assert (await make_preview(c, SITE, "invented-by-client"))[1]["token"] != "invented-by-client"
+
+
+@pytest.mark.parametrize(
+    "files",
+    [[], [{"path": "style.css", "content": "x"}], [{"path": "../index.html", "content": "x"}], "nope", [{"path": "index.html"}]],
+    ids=["empty", "no-index", "traversal", "not-a-list", "no-content"],
+)
+async def test_preview_rejects_bad_files(aiohttp_client, files):
+    c = await client_for(aiohttp_client)
+    assert (await make_preview(c, files))[0] == 400
+
+
+async def test_preview_keeps_only_the_newest(aiohttp_client, monkeypatch):
+    import api
+
+    monkeypatch.setattr(api, "PREVIEW_MAX", 2)
+    c = await client_for(aiohttp_client)
+    tokens = [(await make_preview(c))[1]["token"] for _ in range(3)]
+    assert (await c.get(f"/p/{tokens[0]}/")).status == 404
+    assert (await c.get(f"/p/{tokens[2]}/")).status == 200
+
+
+async def test_preview_on_another_host_is_sandboxed_and_gets_storage(aiohttp_client):
+    c = await client_for(aiohttp_client)
+    token = (await make_preview(c))[1]["token"]
+    page = await c.get(f"/p/{token}/", headers={"Host": "example.com"})
+    assert "sandbox allow-scripts" in page.headers["Content-Security-Policy"]
+    assert "sessionStorage" in await page.text()  # in-memory storage polyfill, since an opaque origin cannot use the real one
+    css = await c.get(f"/p/{token}/style.css", headers={"Host": "example.com"})
+    assert await css.text() == "body{color:red}"  # only index.html is modified

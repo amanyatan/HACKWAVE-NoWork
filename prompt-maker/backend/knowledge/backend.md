@@ -32,3 +32,6 @@ Validate every input on the server. Rate-limit public endpoints. Keep secrets in
 
 ## Deployment and operations
 Containerising with Docker makes deployment repeatable. Hosting options include Render, Railway, Fly.io, Google Cloud Run, AWS and Azure. Set up continuous integration to run tests on every change, use separate development and production environments, and add health checks and error monitoring.
+
+## Testing tools
+Jest and Vitest are JavaScript test runners for unit tests; Vitest works well with Vite projects and Jest is the long-standing default. pytest is the standard test runner for Python. Playwright and Cypress run end-to-end tests that click through the real app in a browser. Postman or Bruno help test and document APIs by hand. Start with unit tests for business rules and a few end-to-end tests for the main user flows such as sign up, create, edit and delete.

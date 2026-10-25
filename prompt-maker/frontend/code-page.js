@@ -1,6 +1,7 @@
 /*
- * Code page: the generated HTML / CSS / JS project. Files on the left, an editable editor in the middle, a live preview
- * on the right, and a ZIP download. The preview runs in a sandboxed iframe with no access to this site.
+ * Code page: the generated HTML / CSS / JS project. File tabs and an editable editor beside a live preview, a real
+ * live URL (http://127.0.0.1:<port>/p/<token>/) that opens in its own tab, and a ZIP download.
+ * The live site is served from the other loopback name (localhost <-> 127.0.0.1), so it is a different origin from this app.
  */
 (function () {
   const { h } = NW;
@@ -15,7 +16,11 @@
   let activePath = null;
   let hintTimer = null;
   let runTimer = null;
+  let liveToken = null; // server-side token of the live site
+  let liveUrl = "";
+  let layout = innerWidth >= 1000 ? "split" : "code"; // code | split | preview
   let el = {}; // editor / preview handles while the project view is on screen
+  const LOOPBACK = ["localhost", "127.0.0.1"];
 
   NW.codeStatus = () => status;
 
@@ -73,24 +78,38 @@
     });
     return /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => m + POLYFILL) : POLYFILL + html;
   }
-  const runPreview = () => { if (el.frame && project) el.frame.srcdoc = buildPreview(project.files); };
+  /** Where the live site lives: the other loopback name, so it can never share an origin (and storage) with this app. */
+  function siteOrigin() {
+    const h = location.hostname;
+    if (!LOOPBACK.includes(h)) return location.origin;
+    return `${location.protocol}//${h === "localhost" ? "127.0.0.1" : "localhost"}${location.port ? `:${location.port}` : ""}`;
+  }
+
+  /** Publish the current files as the live site and point the preview at it. */
+  async function runPreview() {
+    if (!el.frame || !project) return;
+    try {
+      const r = await NW.api("/api/preview", { method: "POST", body: { files: project.files, token: liveToken } });
+      liveToken = r.token;
+      liveUrl = `${siteOrigin()}/p/${liveToken}/`;
+      el.live.value = liveUrl;
+      el.open.disabled = el.copyLink.disabled = false;
+      el.frame.removeAttribute("srcdoc");
+      el.frame.src = `${liveUrl}?v=${Date.now()}`; // cache-buster: reload with the latest edits
+    } catch {
+      el.live.value = "Live link unavailable (is the server running?)";
+      el.frame.srcdoc = buildPreview(project.files); // the in-page preview still works without the server's help
+    }
+  }
 
   /* ---------- editor ---------- */
   const fileOf = (path) => project.files.find((f) => f.path === path);
   const ext = (path) => (path.split(".").pop() || "").toLowerCase();
 
-  function updateGutter() {
-    const lines = el.code.value.split("\n").length;
-    el.gutter.textContent = Array.from({ length: lines }, (_, i) => i + 1).join("\n");
-  }
-
   function openFile(path) {
     activePath = path;
-    const f = fileOf(path);
-    el.code.value = f.content;
-    el.name.textContent = path;
-    el.list.querySelectorAll(".file").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.path === path)));
-    updateGutter();
+    el.code.value = fileOf(path).content;
+    el.tabs.querySelectorAll(".tab").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.path === path)));
     el.code.scrollTop = 0;
   }
 
@@ -131,22 +150,21 @@
   }
 
   function projectView() {
-    el.gutter = h("pre", { class: "gutter" });
-    el.code = h("textarea", { class: "code", spellcheck: "false", "aria-label": "Code editor", autocapitalize: "off", wrap: "off" });
-    el.name = h("span");
-    el.frame = h("iframe", { title: "Live preview", sandbox: "allow-scripts allow-modals allow-forms allow-popups" });
-    el.list = h("div", { class: "files", role: "listbox", "aria-label": "Project files" }, h("h3", {}, "Files"),
-      ...project.files.map((f) => h("button", { class: "file", type: "button", role: "option", "data-path": f.path, onclick: () => openFile(f.path) }, h("span", { class: `ext ${ext(f.path)}` }, ext(f.path)), f.path)));
+    el.code = h("textarea", { class: "code", spellcheck: "false", "aria-label": "Code editor", autocapitalize: "off", wrap: "soft" });
+    el.frame = h("iframe", { title: "Live preview", sandbox: `allow-scripts allow-modals allow-forms allow-popups${LOOPBACK.includes(location.hostname) ? " allow-same-origin" : ""}` });
+    el.live = h("input", { class: "live-url", readonly: true, "aria-label": "Live site address", value: liveUrl || "Preparing your live link…", onfocus: () => el.live.select() });
+    el.open = h("button", { class: "nb-btn primary", type: "button", disabled: !liveUrl, onclick: () => liveUrl && window.open(liveUrl, "_blank", "noopener") }, "Open in new tab ↗");
+    el.copyLink = h("button", { class: "nb-btn", type: "button", disabled: !liveUrl, onclick: () => NW.copy(liveUrl, el.copyLink) }, "Copy link");
+    el.tabs = h("div", { class: "tabs", role: "tablist", "aria-label": "Project files" },
+      ...project.files.map((f) => h("button", { class: "tab", type: "button", role: "tab", "data-path": f.path, onclick: () => openFile(f.path) }, h("span", { class: `ext ${ext(f.path)}` }, ext(f.path)), f.path)));
+    const copy = h("button", { class: "tab-copy", type: "button", onclick: () => NW.copy(el.code.value, copy) }, "Copy file");
 
-    const copy = h("button", { class: "nb-btn", type: "button", onclick: () => NW.copy(el.code.value, copy) }, "Copy");
     el.code.addEventListener("input", () => {
       fileOf(activePath).content = el.code.value;
-      updateGutter();
       cache();
       clearTimeout(runTimer);
-      runTimer = setTimeout(runPreview, 600); // live preview follows your edits
+      runTimer = setTimeout(runPreview, 700); // the live site follows your edits
     });
-    el.code.addEventListener("scroll", () => (el.gutter.scrollTop = el.code.scrollTop));
     el.code.addEventListener("keydown", (e) => {
       if (e.key !== "Tab") return;
       e.preventDefault(); // keep focus in the editor and indent instead
@@ -156,7 +174,19 @@
       el.code.dispatchEvent(new Event("input"));
     });
 
-    const zip = h("button", { class: "nb-btn primary", type: "button", onclick: async () => {
+    el.main = h("div", { class: "cp-main", "data-view": layout },
+      h("div", { class: "editor" }, h("div", { class: "tabs-bar" }, el.tabs, copy), el.code),
+      h("div", { class: "preview-pane" }, h("div", { class: "bar" }, h("span", {}, "Live preview"), h("button", { class: "tab-copy", type: "button", onclick: runPreview }, "Reload ↻")), el.frame)
+    );
+    const seg = h("div", { class: "seg", role: "group", "aria-label": "Layout" },
+      ...[["code", "Code"], ["split", "Split"], ["preview", "Preview"]].map(([v, label]) =>
+        h("button", { type: "button", "data-v": v, "aria-pressed": String(v === layout), onclick: () => {
+          layout = v;
+          el.main.dataset.view = v;
+          seg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+        } }, label)));
+
+    const zip = h("button", { class: "nb-btn", type: "button", onclick: async () => {
       zip.disabled = true;
       try { NW.saveBlob(await NW.fetchBlob("/api/zip", { files: project.files }), `${NW.slug(project.title)}.zip`); }
       catch (e) { alert(`Could not make the ZIP: ${e.message}`); }
@@ -165,15 +195,12 @@
 
     return shell(
       h("div", { class: "cp-top" },
-        h("div", {}, h("h1", {}, project.title), h("p", { class: "lede" }, "Plain HTML, CSS and JavaScript. Edit any file and the preview updates."),
+        h("div", {}, h("h1", {}, project.title), h("p", { class: "lede" }, "Plain HTML, CSS and JavaScript. Edit any file and the live site updates."),
           h("div", { class: "pp-chips", style: "margin-top:10px" }, h("span", { class: "chip" }, `${project.files.length} files`), h("span", { class: "chip" }, "No build step"), project.saved && h("span", { class: "chip ok" }, "Saved"))),
-        h("div", { class: "cp-actions" }, h("button", { class: "nb-btn", type: "button", onclick: runPreview }, "Run ▶"), zip)
+        h("div", { class: "cp-actions" }, zip)
       ),
-      h("div", { class: "cp-grid" },
-        el.list,
-        h("div", { class: "editor" }, h("div", { class: "bar" }, el.name, copy), h("div", { class: "editor-body" }, el.gutter, el.code)),
-        h("div", { class: "preview-pane" }, h("div", { class: "bar" }, h("span", {}, "Live preview")), el.frame)
-      )
+      h("div", { class: "live-bar" }, h("label", {}, "Live site"), el.live, el.open, el.copyLink, seg),
+      el.main
     );
   }
 

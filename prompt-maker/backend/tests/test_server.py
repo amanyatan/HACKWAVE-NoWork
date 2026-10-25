@@ -110,6 +110,7 @@ async def test_doc_rejects_non_json(aiohttp_client):
         ("authentication OAuth JWT roles", "Authentication proves who the user is"),
         ("what requirements questions to ask about database", "Ask whether the user prefers SQL"),
         ("Flutter or React Native mobile app", "Flutter builds iOS and Android"),
+        ("Jest Vitest pytest Playwright testing tools", "Jest and Vitest are JavaScript test runners"),
     ],
 )
 def test_new_knowledge_is_retrievable(query, must_contain):

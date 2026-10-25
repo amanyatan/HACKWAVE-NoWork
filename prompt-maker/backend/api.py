@@ -1,6 +1,10 @@
 """HTTP API for prompt history, code projects and zip download. Everything is keyed by a random client_id kept in the browser."""
+import collections
 import datetime
 import io
+import mimetypes
+import re
+import secrets
 import time
 import uuid
 import zipfile
@@ -191,8 +195,66 @@ async def make_zip(request):
     return web.Response(body=out.getvalue(), content_type="application/zip", headers={"Content-Disposition": 'attachment; filename="nowork-project.zip"'})
 
 
+# ---------- live preview: the generated site served as a real URL (http://127.0.0.1:8000/p/<token>/) ----------
+PREVIEW_MAX = 50  # newest previews kept in memory; older ones are dropped
+LOOPBACK = {"127.0.0.1", "localhost"}
+# No external resources, and forms can only post back to the page itself.
+PREVIEW_CSP = "default-src 'self' 'unsafe-inline' data: blob:; base-uri 'self'; form-action 'self'"
+# A page that cannot touch localStorage (opaque origin) gets an in-memory one so generated apps still run.
+STORAGE_POLYFILL = (
+    "<script>(function(){function mk(){var m={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null},"
+    "setItem:function(k,v){m[k]=String(v)},removeItem:function(k){delete m[k]},clear:function(){m={}},key:function(i){return Object.keys(m)[i]||null},"
+    "get length(){return Object.keys(m).length}}}['localStorage','sessionStorage'].forEach(function(n){try{Object.defineProperty(window,n,{value:mk(),configurable:true})}catch(e){}})})()</script>"
+)
+
+
+async def put_preview(request):
+    """Stores (or updates) a project in memory and returns its token. Edits from the Code page reuse the same token."""
+    if limited(request, "rw", 120, 60):
+        return err(429, "rate limited")
+    try:
+        data = await body_of(request)
+        files = codegen.validate_files(data.get("files"), require_index=True)
+    except ValueError as e:
+        return err(400, str(e))
+    store = request.app["previews"]
+    token = data.get("token")
+    if not (isinstance(token, str) and token in store):
+        token = secrets.token_urlsafe(12)
+    store[token] = {f["path"]: f["content"] for f in files}
+    store.move_to_end(token)
+    while len(store) > PREVIEW_MAX:
+        store.popitem(last=False)
+    return web.json_response({"token": token})
+
+
+async def preview_redirect(request):
+    raise web.HTTPFound(f"/p/{request.match_info['token']}/")  # relative links in the page need the trailing slash
+
+
+async def preview_file(request):
+    files = request.app["previews"].get(request.match_info["token"])
+    path = request.match_info["path"] or "index.html"
+    if files is None or path not in files:
+        return web.Response(status=404, text="Preview not found. Open the Code page and press Run to create it again.")
+    body = files[path]
+    csp = PREVIEW_CSP
+    if request.url.host not in LOOPBACK:
+        # Not the loopback pair the Code page swaps between, so this could share an origin with the app: lock the page down.
+        csp += "; sandbox allow-scripts allow-forms allow-modals allow-popups"
+        if path == "index.html":
+            body = re.sub(r"<head[^>]*>", lambda m: m.group(0) + STORAGE_POLYFILL, body, count=1, flags=re.I) if re.search(r"<head[^>]*>", body, re.I) else STORAGE_POLYFILL + body
+    return web.Response(
+        text=body,
+        content_type=mimetypes.guess_type(path)[0] or "text/plain",
+        charset="utf-8",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Content-Security-Policy": csp},
+    )
+
+
 def add_routes(app: web.Application) -> None:
     app["limits"] = {}
+    app["previews"] = collections.OrderedDict()
     app.router.add_get("/api/health", health)
     app.router.add_post("/api/prompt-sets", create_set)
     app.router.add_get("/api/prompt-sets", list_sets)
@@ -200,3 +262,6 @@ def add_routes(app: web.Application) -> None:
     app.router.add_post("/api/code", create_code)
     app.router.add_get("/api/code", latest_code)
     app.router.add_post("/api/zip", make_zip)
+    app.router.add_post("/api/preview", put_preview)
+    app.router.add_get("/p/{token}", preview_redirect)
+    app.router.add_get("/p/{token}/{path:.*}", preview_file)
