@@ -3,6 +3,7 @@ import collections
 import datetime
 import io
 import mimetypes
+import os
 import re
 import secrets
 import time
@@ -22,9 +23,19 @@ def err(status: int, message: str) -> web.Response:
     return web.json_response({"error": message}, status=status)
 
 
+def client_ip(request) -> str:
+    """The caller's address. Behind Vercel's proxy it is in x-forwarded-for, which the platform sets itself; anywhere else that
+    header could be forged, so it is only trusted when running on Vercel."""
+    if os.environ.get("VERCEL"):
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return request.remote or "unknown"
+
+
 def limited(request, bucket: str, limit: int, window: int) -> bool:
-    """Per-IP sliding window, one counter per bucket."""
-    hits = request.app["limits"].setdefault((bucket, request.remote), [])
+    """Per-IP sliding window, one counter per bucket. (Per server instance: good enough to blunt abuse, not exact on serverless.)"""
+    hits = request.app["limits"].setdefault((bucket, client_ip(request)), [])
     now = time.monotonic()
     hits[:] = [t for t in hits if now - t < window]
     if len(hits) >= limit:
@@ -257,14 +268,24 @@ STORAGE_POLYFILL = (
 
 
 async def put_preview(request):
-    """Stores (or updates) a project in memory and returns its token. Edits from the Code page reuse the same token."""
+    """Publishes a project as a live site and returns its token. A saved project (project_id + client_id) is published from the
+    database, so the link works from any serverless instance and survives restarts; the token is the project id. Anything else
+    (a project that only exists in the browser) is kept in this server's memory."""
     if limited(request, "preview", 240, 60):  # its own counter: one refresh per typing pause is ~85 a minute
         return err(429, "rate limited")
     try:
         data = await body_of(request)
         files = codegen.validate_files(data.get("files"), require_index=True)
+        project_id = as_uuid(data["project_id"]) if data.get("project_id") else None
+        client_id = as_uuid(data.get("client_id")) if project_id else None
     except ValueError as e:
         return err(400, str(e))
+    if project_id:
+        try:
+            rows = await request.app["db"].update("code_projects", {"id": f"eq.{project_id}", "client_id": f"eq.{client_id}"}, {"files": files})
+        except DbError as e:
+            return err(503, str(e))
+        return web.json_response({"token": project_id}) if rows else err(404, "project not found")
     store = request.app["previews"]
     token = data.get("token")
     if not (isinstance(token, str) and token in store):
@@ -281,7 +302,14 @@ async def preview_redirect(request):
 
 
 async def preview_file(request):
-    files = request.app["previews"].get(request.match_info["token"])
+    token = request.match_info["token"]
+    files = request.app["previews"].get(token)
+    if files is None:  # not in this instance's memory: it may be a saved project, whose token is its id
+        try:
+            rows = await request.app["db"].select("code_projects", {"id": f"eq.{as_uuid(token)}", "select": "files"})
+        except (ValueError, DbError):
+            rows = []
+        files = {f["path"]: f["content"] for f in rows[0]["files"]} if rows else None
     path = request.match_info["path"] or "index.html"
     if files is None or path not in files:
         return web.Response(status=404, text="Preview not found. Open the Code page and press Run to create it again.")

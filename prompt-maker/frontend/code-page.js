@@ -198,7 +198,7 @@
   async function runPreview() {
     if (!el.frame || !project) return;
     try {
-      const r = await NW.api("/api/preview", { method: "POST", body: { files: project.files, token: liveToken } });
+      const r = await NW.api("/api/preview", { method: "POST", body: { files: project.files, token: liveToken, ...(project.local ? {} : { project_id: project.id, client_id: NW.clientId }) } });
       liveToken = r.token;
       liveUrl = `${siteOrigin()}/p/${liveToken}/`;
       el.live.value = liveUrl;

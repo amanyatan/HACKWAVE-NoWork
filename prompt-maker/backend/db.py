@@ -1,4 +1,5 @@
 """Minimal Supabase (PostgREST) client over aiohttp. Server side only: it uses the service role key."""
+import asyncio
 import os
 
 import aiohttp
@@ -13,6 +14,7 @@ class Supabase:
         self.url = (url or os.environ.get("SUPABASE_URL", "")).rstrip("/")
         self.key = key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
         self._session: aiohttp.ClientSession | None = None
+        self._loop = None
 
     @property
     def configured(self) -> bool:
@@ -21,8 +23,10 @@ class Supabase:
     async def _request(self, method: str, table: str, *, params=None, json=None, prefer: str | None = None):
         if not self.configured:
             raise DbError("database is not configured")
-        if self._session is None:
+        loop = asyncio.get_running_loop()
+        if self._session is None or self._session.closed or self._loop is not loop:  # a session belongs to the loop that made it
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+            self._loop = loop
         headers = {"apikey": self.key, "Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
         if prefer:
             headers["Prefer"] = prefer

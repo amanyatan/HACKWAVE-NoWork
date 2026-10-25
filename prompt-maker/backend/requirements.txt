@@ -1,4 +1,5 @@
-aiohttp>=3.8.0
+# Pinned: aio_asgi.py relies on aiohttp's Application._handle, which is not a public API.
+aiohttp==3.14.5
 google-genai
 python-dotenv
 python-docx

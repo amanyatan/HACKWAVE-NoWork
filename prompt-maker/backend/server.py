@@ -38,7 +38,7 @@ if not client:
 
 def rate_limited(request) -> bool:
     """Per-IP sliding window shared by the endpoints that cost us something."""
-    hits = request.app["hits"].setdefault(request.remote, [])
+    hits = request.app["hits"].setdefault(api.client_ip(request), [])
     now_s = time.monotonic()
     hits[:] = [t for t in hits if now_s - t < RATE_WINDOW]
     if len(hits) >= RATE_LIMIT:
@@ -140,7 +140,9 @@ async def serve_static_file(request):
     try:
         with open(file_path, "rb") as f:
             content = f.read()
-        return web.Response(body=content, content_type=content_type)
+        # The speaker model is 26 MB: let the browser keep it (and the font) instead of downloading it every visit.
+        headers = {"Cache-Control": "public, max-age=86400"} if path.startswith(("models/", "fonts/")) else None
+        return web.Response(body=content, content_type=content_type, headers=headers)
     except Exception as e:
         print(f"Error serving file {path}: {e}")
         return web.Response(text="Internal server error", status=500)
