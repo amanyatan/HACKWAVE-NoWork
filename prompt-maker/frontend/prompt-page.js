@@ -28,6 +28,7 @@
   const byNewest = (a, b) => new Date(b.created_at) - new Date(a.created_at);
   const doneCount = (set) => set.steps.filter((s) => s.downloaded_at).length;
   const nextIndex = (set) => set.steps.findIndex((s) => !s.downloaded_at); // -1 when finished
+  const parkAt = (set) => (nextIndex(set) === -1 ? set.steps.length - 1 : nextIndex(set)); // where the traveler waits: the next stop, or the last one when the trip is complete
 
   async function loadHistory() {
     let remote = [];
@@ -93,6 +94,15 @@
     syncNew(set).then(() => wantsCode && NW.codeRequested({ setId: set.local ? null : set.id, title: set.title, summary: set.summary, aiTool: set.ai_tool, steps }));
   };
 
+  /** Open the Code page; if no code exists yet (never started, failed, or lost on reload), ask for it from this set's prompts. */
+  function goCode(set) {
+    const st = NW.codeStatus();
+    if (set.wants_code && (st === "empty" || st === "error")) {
+      NW.codeRequested({ setId: set.local ? null : set.id, title: set.title, summary: set.summary, aiTool: set.ai_tool, steps: set.steps });
+    }
+    NW.go("code");
+  }
+
   /* ---------- downloads ---------- */
   async function downloadSteps(set, list, filename) {
     if (busy) return;
@@ -149,7 +159,7 @@
     const traveler = h("div", { class: "rm-traveler" }, h("img", { src: "logo.svg", alt: "" }));
     const rm = h("div", { class: "rm" }, svg("svg", { class: "rm-svg", "aria-hidden": "true" }), h("ol", { class: "rm-stops" }, stops), traveler);
     rm.querySelector(".rm-svg").append(road, dash, trail);
-    ui = { set, rm, road, dash, trail, traveler, stops, lens: [], total: 0, at: Math.max(0, nextIndex(set)) };
+    ui = { set, rm, road, dash, trail, traveler, stops, lens: [], total: 0, at: parkAt(set) };
     roadEl.replaceChildren(rm);
     renderChrome();
   }
@@ -240,7 +250,8 @@
     renderChrome();
     clearTimeout(doneTimer);
     if (active.wants_code) {
-      doneTimer = setTimeout(() => NW.route() === "prompt" && NW.go("code"), 4000);
+      const set = active;
+      doneTimer = setTimeout(() => NW.route() === "prompt" && active === set && goCode(set), 4000);
     }
   }
 
@@ -269,13 +280,13 @@
           h("div", { class: "progress-bar" }, h("i", { style: `width:${total ? (done / total) * 100 : 0}%` })),
           h("div", { class: "pp-actions" },
             h("button", { class: "nb-btn", type: "button", onclick: () => downloadAll(set), disabled: busy }, "Download all (.docx)"),
-            set.wants_code && h("button", { class: "nb-btn", type: "button", onclick: () => NW.go("code") }, codeReady ? "Open code ✓" : "Go to Code")
+            set.wants_code && h("button", { class: "nb-btn", type: "button", onclick: () => goCode(set) }, codeReady ? "Open code ✓" : NW.codeStatus() === "generating" ? "Go to Code" : "Generate code")
           )
         )
       )
     );
     if (set && finished) {
-      kids.push(h("div", { class: "pp-banner success" }, "🎉 All steps downloaded. This roadmap is now saved in your history below.", set.wants_code && h("button", { class: "nb-btn primary", type: "button", onclick: () => NW.go("code") }, "Continue to Code")));
+      kids.push(h("div", { class: "pp-banner success" }, "🎉 All steps downloaded. This roadmap is now saved in your history below.", set.wants_code && h("button", { class: "nb-btn primary", type: "button", onclick: () => goCode(set) }, "Continue to Code")));
     } else if (set && set.wants_code && NW.codeStatus() === "generating") {
       kids.push(h("div", { class: "pp-banner info" }, "⚙️ Your code is being prepared in the background. It will be waiting on the Code page."));
     }
@@ -305,18 +316,19 @@
     active = set;
     clearTimeout(doneTimer);
     buildRoadmap();
-    applyStates(Math.max(0, nextIndex(set)));
+    applyStates(parkAt(set));
     window.scrollTo(0, 0);
   }
 
   NW.pages.prompt = {
+    refresh: renderChrome, // lets the Code page update the "being prepared" banner
     async onShow() {
       await loadHistory();
       if (!active) roadEl.replaceChildren(emptyEl());
       else if (!ui || ui.set !== active) buildRoadmap();
       if (ui) {
-        applyStates(Math.max(0, nextIndex(active)));
-        ui.at = Math.max(0, nextIndex(active));
+        applyStates(parkAt(active));
+        ui.at = parkAt(active);
         layoutRoadmap();
       }
       renderChrome();

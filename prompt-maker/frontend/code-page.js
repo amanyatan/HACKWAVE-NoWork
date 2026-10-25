@@ -32,6 +32,7 @@
     status = "generating";
     error = "";
     render();
+    if (NW.route() === "prompt") NW.pages.prompt.refresh();
     try {
       const r = await NW.api("/api/code", {
         method: "POST",
@@ -49,7 +50,7 @@
     }
     clearInterval(hintTimer);
     if (NW.route() === "code") render();
-    else if (NW.route() === "prompt") NW.pages.prompt.onShow(); // refresh the "being prepared" banner
+    else if (NW.route() === "prompt") NW.pages.prompt.refresh(); // drop the "being prepared" banner
   }
 
   /* ---------- preview ---------- */
