@@ -53,6 +53,9 @@ class FakeDb:
     async def select(self, table, params):
         self._check()
         rows = [dict(r) for r in self.tables[table] if self._match(r, params)]
+        cols = params.get("select", "*")
+        if cols != "*":  # like PostgREST: only the requested columns come back
+            rows = [{c: r[c] for c in cols.split(",") if c in r} for r in rows]
         if "order" in params:
             col, _, direction = params["order"].partition(".")
             rows.sort(key=lambda r: r[col], reverse=direction == "desc")
@@ -322,3 +325,59 @@ async def test_preview_on_another_host_is_sandboxed_and_gets_storage(aiohttp_cli
     assert "sessionStorage" in await page.text()  # in-memory storage polyfill, since an opaque origin cannot use the real one
     css = await c.get(f"/p/{token}/style.css", headers={"Host": "example.com"})
     assert await css.text() == "body{color:red}"  # only index.html is modified
+
+
+async def new_project(c, db, title="Todo app", client_id=CLIENT):
+    r = await c.post("/api/code", json={**CODE_BODY, "title": title, "client_id": client_id})
+    return (await r.json())["id"]
+
+
+async def test_code_history_lists_newest_first_without_files(aiohttp_client):
+    c = await client_for(aiohttp_client, gemini=FakeGemini(GOOD_CODE))
+    await new_project(c, None, "First")
+    await new_project(c, None, "Second")
+    await new_project(c, None, "Not mine", client_id=OTHER)
+    listed = await (await c.get("/api/code-projects", params={"client_id": CLIENT})).json()
+    assert [p["title"] for p in listed["projects"]] == ["Second", "First"]
+    assert all("files" not in p for p in listed["projects"])  # metadata only; files load on open
+
+
+async def test_open_a_code_project_by_id(aiohttp_client):
+    c = await client_for(aiohttp_client, gemini=FakeGemini(GOOD_CODE))
+    pid = await new_project(c, None)
+    got = await (await c.get(f"/api/code-projects/{pid}", params={"client_id": CLIENT})).json()
+    assert {f["path"] for f in got["project"]["files"]} == {"index.html", "style.css", "script.js"}
+    assert (await c.get(f"/api/code-projects/{pid}", params={"client_id": OTHER})).status == 404  # not someone else's
+    assert (await c.get(f"/api/code-projects/{uuid.uuid4()}", params={"client_id": CLIENT})).status == 404
+
+
+async def test_saving_edits_persists_and_is_owner_only(aiohttp_client):
+    c = await client_for(aiohttp_client, gemini=FakeGemini(GOOD_CODE))
+    pid = await new_project(c, None)
+    edited = [{"path": "index.html", "content": "<h1>edited</h1>"}, {"path": "notes.md", "content": "hi"}]
+    ok = await c.put(f"/api/code-projects/{pid}", json={"client_id": CLIENT, "files": edited})
+    assert ok.status == 200 and await ok.json() == {"saved": True}
+    reopened = await (await c.get(f"/api/code-projects/{pid}", params={"client_id": CLIENT})).json()
+    assert reopened["project"]["files"] == edited
+    # another client cannot overwrite it, and nothing changed
+    assert (await c.put(f"/api/code-projects/{pid}", json={"client_id": OTHER, "files": edited[:1]})).status == 404
+    assert len((await (await c.get(f"/api/code-projects/{pid}", params={"client_id": CLIENT})).json())["project"]["files"]) == 2
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"client_id": "nope", "files": SITE}, {"client_id": CLIENT, "files": []}, {"client_id": CLIENT, "files": [{"path": "style.css", "content": "x"}]}, {"client_id": CLIENT, "files": [{"path": "../x.html", "content": "x"}, {"path": "index.html", "content": "x"}]}],
+    ids=["empty", "bad-client", "no-files", "no-index", "traversal"],
+)
+async def test_saving_edits_rejects_bad_input(aiohttp_client, body):
+    c = await client_for(aiohttp_client, gemini=FakeGemini(GOOD_CODE))
+    pid = await new_project(c, None)
+    assert (await c.put(f"/api/code-projects/{pid}", json=body)).status == 400
+
+
+async def test_code_history_when_database_is_down(aiohttp_client):
+    c = await client_for(aiohttp_client, db=FakeDb(fail=True))
+    assert (await c.get("/api/code-projects", params={"client_id": CLIENT})).status == 503
+    assert (await c.get(f"/api/code-projects/{uuid.uuid4()}", params={"client_id": CLIENT})).status == 503
+    assert (await c.put(f"/api/code-projects/{uuid.uuid4()}", json={"client_id": CLIENT, "files": SITE})).status == 503
+    assert (await c.get("/api/code-projects", params={"client_id": "x"})).status == 400

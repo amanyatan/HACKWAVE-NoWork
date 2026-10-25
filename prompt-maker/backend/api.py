@@ -181,6 +181,54 @@ async def latest_code(request):
     return web.json_response({"project": rows[0] if rows else None})
 
 
+async def list_code(request):
+    """History of this client's code projects, newest first. Metadata only: the files are loaded when a project is opened."""
+    if limited(request, "rw", 60, 60):
+        return err(429, "rate limited")
+    try:
+        client_id = as_uuid(request.query.get("client_id"))
+    except ValueError as e:
+        return err(400, str(e))
+    try:
+        rows = await request.app["db"].select("code_projects", {"client_id": f"eq.{client_id}", "order": "created_at.desc", "limit": "30", "select": "id,title,created_at,set_id"})
+    except DbError as e:
+        return err(503, str(e))
+    return web.json_response({"projects": rows})
+
+
+async def get_code(request):
+    if limited(request, "rw", 60, 60):
+        return err(429, "rate limited")
+    try:
+        client_id = as_uuid(request.query.get("client_id"))
+        project_id = as_uuid(request.match_info["project_id"])
+    except ValueError as e:
+        return err(400, str(e))
+    try:
+        rows = await request.app["db"].select("code_projects", {"id": f"eq.{project_id}", "client_id": f"eq.{client_id}", "select": "*"})
+    except DbError as e:
+        return err(503, str(e))
+    return web.json_response({"project": rows[0]}) if rows else err(404, "project not found")
+
+
+async def update_code(request):
+    """Saves the user's edits. The client_id filter on the update is what keeps one client from touching another's project."""
+    if limited(request, "rw", 120, 60):
+        return err(429, "rate limited")
+    try:
+        data = await body_of(request)
+        client_id = as_uuid(data.get("client_id"))
+        project_id = as_uuid(request.match_info["project_id"])
+        files = codegen.validate_files(data.get("files"), require_index=True)
+    except ValueError as e:
+        return err(400, str(e))
+    try:
+        rows = await request.app["db"].update("code_projects", {"id": f"eq.{project_id}", "client_id": f"eq.{client_id}"}, {"files": files})
+    except DbError as e:
+        return err(503, str(e))
+    return web.json_response({"saved": True}) if rows else err(404, "project not found")
+
+
 async def make_zip(request):
     if limited(request, "rw", 60, 60):
         return err(429, "rate limited")
@@ -261,6 +309,9 @@ def add_routes(app: web.Application) -> None:
     app.router.add_post("/api/prompt-steps/{step_id}/downloaded", mark_downloaded)
     app.router.add_post("/api/code", create_code)
     app.router.add_get("/api/code", latest_code)
+    app.router.add_get("/api/code-projects", list_code)
+    app.router.add_get("/api/code-projects/{project_id}", get_code)
+    app.router.add_put("/api/code-projects/{project_id}", update_code)
     app.router.add_post("/api/zip", make_zip)
     app.router.add_post("/api/preview", put_preview)
     app.router.add_get("/p/{token}", preview_redirect)
