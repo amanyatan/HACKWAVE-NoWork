@@ -128,8 +128,8 @@ try {
   if (window.GradientWave) wave = new GradientWave($("wave"), { isPlaying: !reducedMotion });
 } catch (e) { console.error(e); }
 
-// Voice waves behind the avatar; bars read the agent's real playback audio (see voice-viz.js).
-const viz = new VoiceViz($("waveViz"), () => $("avatar").offsetWidth);
+// Loudness of the agent's real playback audio, used to tell when it has really stopped talking (see voice-level.js).
+const voiceLevel = new VoiceLevel();
 
 // One colour theme per voice. Wave colours alternate a tint with white; the Rive avatar has no colour inputs,
 // so it is recoloured with a CSS hue-rotate (hue/sat tuned by eye against the file's blue).
@@ -147,7 +147,6 @@ function applyTheme(voice, animate = true) {
   }
   document.documentElement.style.setProperty("--sky", t.sky); // shared by the navbar and the Prompt and Code pages
   document.documentElement.style.setProperty("--accent", t.accent);
-  viz.accent = t.accent;
   $("riveCanvas").style.filter = t.filter;
   wave?.setColors([t.tint, "#ffffff", t.tint, "#ffffff", t.tint, "#ffffff"], animate && !reducedMotion ? 900 : 0);
   if (animate && !reducedMotion) { // little pop so the change reads as intentional
@@ -231,18 +230,15 @@ function onMicLevel(rms) {
   }
 }
 
-// Each frame: pulse the avatar with the voice, and go back to listening once the agent has really stopped.
-viz.onFrame = (avg) => {
-  el.mic.style.transform = avg > 0.01 ? `scale(${1 + avg * 0.05})` : "";
-  if (avg > 0.02) state.lastSound = performance.now();
+// While the agent's voice is audible, note it; go back to listening once it has really stopped.
+voiceLevel.onLevel = (level) => {
+  if (level > 0.01) state.lastSound = performance.now();
   checkSpeakingEnd();
 };
 function checkSpeakingEnd() {
   const now = performance.now();
   if ($("avatar").dataset.state === "speaking" && now - state.lastSound > 800 && now - state.lastChunk > 800) setOrb("listening");
 }
-// Also on a timer: animation frames stop in background tabs, and the state must not get stuck on "speaking".
-setInterval(checkSpeakingEnd, 250);
 
 // The finished prompts go to the Prompt page; the voice session stays live while the page changes.
 function showPrompts(tool, steps, meta) {
@@ -300,8 +296,7 @@ function reset() {
   NW.setLive(false);
   el.voice.disabled = false;
   clearTimeout(state.thinkTimer);
-  viz.stop();
-  el.mic.style.transform = "";
+  voiceLevel.stop();
   mic.spoke = false;
   $("avatar").dataset.state = "idle";
   el.mic.disabled = false;
@@ -340,8 +335,8 @@ async function start() {
 
     state.player = new AudioPlayer();
     await state.player.init();
-    viz.attach(state.player.audioContext, state.player.gainNode); // waves follow the agent's real audio
-    viz.start();
+    voiceLevel.attach(state.player.audioContext, state.player.gainNode);
+    voiceLevel.start();
     await client.connect();
     state.streamer = new AudioStreamer(client);
     await state.streamer.start();

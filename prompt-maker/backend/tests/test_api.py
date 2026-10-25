@@ -381,3 +381,17 @@ async def test_code_history_when_database_is_down(aiohttp_client):
     assert (await c.get(f"/api/code-projects/{uuid.uuid4()}", params={"client_id": CLIENT})).status == 503
     assert (await c.put(f"/api/code-projects/{uuid.uuid4()}", json={"client_id": CLIENT, "files": SITE})).status == 503
     assert (await c.get("/api/code-projects", params={"client_id": "x"})).status == 400
+
+
+async def test_heavy_editing_does_not_lock_out_history(aiohttp_client):
+    """Typing in the Code page fires a preview refresh and a save at every pause. That must never use up the allowance
+    of the history endpoints, or the Prompt page wrongly reports that the database is down."""
+    c = await client_for(aiohttp_client, gemini=FakeGemini(GOOD_CODE))
+    pid = await new_project(c, None)
+    token = (await make_preview(c))[1]["token"]
+    for _ in range(40):  # 80 requests in well under a minute
+        assert (await make_preview(c, SITE, token))[0] == 200
+        assert (await c.put(f"/api/code-projects/{pid}", json={"client_id": CLIENT, "files": SITE})).status == 200
+    assert (await c.get("/api/prompt-sets", params={"client_id": CLIENT})).status == 200
+    assert (await c.get("/api/code-projects", params={"client_id": CLIENT})).status == 200
+    assert (await c.get(f"/api/code-projects/{pid}", params={"client_id": CLIENT})).status == 200

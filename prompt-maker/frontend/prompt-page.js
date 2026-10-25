@@ -13,7 +13,8 @@
 
   let sets = []; // newest first
   let active = null; // the set shown as a roadmap
-  let dbOk = null; // null = unknown yet
+  let dbOk = null; // null = unknown yet; reflects only whether the history list could be loaded
+  let dbWhy = "down"; // missing | busy | down, when dbOk is false
   let ui = null; // handles into the roadmap DOM
   let doneTimer = null;
   let busy = false;
@@ -30,16 +31,30 @@
   const nextIndex = (set) => set.steps.findIndex((s) => !s.downloaded_at); // -1 when finished
   const parkAt = (set) => (nextIndex(set) === -1 ? set.steps.length - 1 : nextIndex(set)); // where the traveler waits: the next stop, or the last one when the trip is complete
 
+  /** One try, and one more after a short pause: a single hiccup should not flip the page into "database down". */
+  async function fetchRemote() {
+    const url = `/api/prompt-sets?client_id=${NW.clientId}`;
+    try {
+      return (await NW.api(url)).sets;
+    } catch (e) {
+      if (NW.dbProblem(e) === "missing") throw e; // retrying cannot create tables
+      await new Promise((r) => setTimeout(r, 1200));
+      return (await NW.api(url)).sets;
+    }
+  }
+
   async function loadHistory() {
     let remote = [];
     try {
-      remote = (await NW.api(`/api/prompt-sets?client_id=${NW.clientId}`)).sets;
+      remote = await fetchRemote();
       dbOk = true;
-    } catch {
+    } catch (e) {
       dbOk = false;
+      dbWhy = NW.dbProblem(e);
     }
     const mine = new Map(sets.filter((x) => x.id).map((x) => [x.id, x])); // keep live objects: the roadmap holds references to them
-    const merged = sets.filter((x) => x.local);
+    // If the database could not be reached, keep every set we already have instead of dropping the saved ones from the page.
+    const merged = dbOk ? sets.filter((x) => x.local) : [...sets];
     for (const r of remote) if (!merged.some((m) => m.id === r.id)) merged.push(mine.get(r.id) || r);
     for (const l of loadLocal()) if (!merged.some((m) => m.created_at === l.created_at)) merged.push(l);
     sets = merged.sort(byNewest);
@@ -57,11 +72,9 @@
       set.id = r.id;
       r.steps.forEach((s) => { const st = set.steps.find((x) => x.position === s.position); if (st) st.id = s.id; });
       set.local = false;
-      dbOk = true;
       for (const st of set.steps) if (st.downloaded_at) markRemote(set, st); // downloaded before the save finished
     } catch {
-      dbOk = false;
-      set.local = true;
+      set.local = true; // kept on this device and retried on the next load; it is marked in History, and does not blame the database
     }
     set.syncing = false;
     saveLocal();
@@ -268,7 +281,7 @@
     const codeReady = NW.codeStatus() === "ready";
 
     const kids = [];
-    if (dbOk === false) kids.push(h("p", { class: "note" }, "History is saved on this device only because the database is not set up yet (run backend/supabase/schema.sql in Supabase)."));
+    if (dbOk === false) kids.push(NW.dbNote(dbWhy, () => NW.pages.prompt.onShow()));
     kids.push(
       h("div", { class: "pp-top" },
         h("div", { class: "pp-title" },
@@ -303,7 +316,7 @@
       const total = set.steps.length;
       list.append(
         h("div", { class: `hist-item${set === active ? " current" : ""}` },
-          h("div", { class: "meta" }, h("b", {}, set.title), h("small", {}, `${new Date(set.created_at).toLocaleString()}${set.ai_tool ? ` · ${set.ai_tool}` : ""}`)),
+          h("div", { class: "meta" }, h("b", {}, set.title), h("small", {}, `${new Date(set.created_at).toLocaleString()}${set.ai_tool ? ` · ${set.ai_tool}` : ""}${set.local ? " · this device only" : ""}`)),
           h("div", { class: "mini" }, h("small", {}, done === total ? "Complete ✓" : `${done} / ${total} downloaded`), h("div", { class: "progress-bar" }, h("i", { style: `width:${(done / total) * 100}%` }))),
           set === active ? h("span", { class: "chip ok" }, "Current") : h("button", { class: "nb-btn", type: "button", onclick: () => open(set) }, "Open roadmap"),
           h("button", { class: "nb-btn", type: "button", onclick: () => downloadAll(set) }, "Download all")

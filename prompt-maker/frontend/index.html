@@ -37,9 +37,12 @@
     /* The oversized canvas would otherwise paint over the text, so lift text above it. */
     .hero > .hero-top { z-index: 2; }
     .hero-mid #status, .hero-mid .voice { position: relative; z-index: 2; }
-    .hero-mid #status { margin-top: 30px; } /* room for the lowest voice bars */
+    .hero-mid #status { margin-top: 20px; }
     .hero-top { text-align: center; }
     .hero header h1 { margin: 0 0 6px; font-size: clamp(1.7rem, 4.2vw, 2.8rem); font-weight: 800; letter-spacing: -.03em; color: #0b1b3a; }
+    /* "Build" gets a slowly flowing gradient. First and last colour match and the image is twice the word's width, so the loop has no seam. Deep tones keep it readable on every theme. */
+    .grad { background: linear-gradient(90deg, #0369a1, #6d28d9, #be185d, #c2410c, #0369a1); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; -webkit-text-fill-color: transparent; animation: gradflow 5s linear infinite; }
+    @keyframes gradflow { from { background-position: 0% 0; } to { background-position: 200% 0; } }
     .hero header p { font-size: clamp(1rem, 2vw, 1.2rem); font-weight: 600; color: #1e3a5f; }
     #agentName { display: inline-block; font-weight: 800; color: #0b1b3a; }
     #agentName.flip { animation: nameIn .45s cubic-bezier(.34,1.56,.64,1); }
@@ -53,20 +56,21 @@
     #micBtn:disabled { cursor: wait; }
     #micBtn .fallback { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; border-radius: var(--avatar-radius); background: linear-gradient(135deg, var(--cyan), var(--violet)); }
     #micBtn.rive-ok .fallback { display: none; }
-    /* Voice waves: a canvas centred on the avatar, painted first so the avatar sits on top of the bars. */
-    #waveViz { position: absolute; left: 50%; top: 50%; width: 175%; height: 175%; transform: translate(-50%, -50%); pointer-events: none; z-index: 0; }
     #avatar.swap { animation: swap .7s cubic-bezier(.34,1.56,.64,1); }
     @keyframes swap { 0% { transform: scale(1); } 35% { transform: scale(.9); } 100% { transform: scale(1); } }
     #avatar::before, #avatar::after { content: ""; position: absolute; inset: 0; border-radius: var(--avatar-radius); border: 3px solid #fff; opacity: 0; pointer-events: none; }
     #avatar[data-state="listening"] #micBtn { box-shadow: 0 0 0 4px rgba(255,255,255,.75), 0 0 60px rgba(255,255,255,.9); }
     #avatar[data-state="listening"]::before { animation: ring 2.4s ease-out infinite; }
     #avatar[data-state="speaking"] #micBtn { box-shadow: 0 0 0 4px rgba(255,255,255,.85), 0 0 64px var(--accent, #38bdf8); }
+    /* While the agent talks: the same ring as listening, in the theme colour, appearing and fading out, twice per cycle. */
+    #avatar[data-state="speaking"]::before, #avatar[data-state="speaking"]::after { border-color: var(--accent, #38bdf8); animation: ring 1.6s ease-out infinite; }
+    #avatar[data-state="speaking"]::after { animation-delay: .8s; }
     #avatar[data-state="thinking"] #micBtn { animation: spin-glow 1.4s linear infinite; }
     #avatar[data-state="connecting"] #micBtn { opacity: .7; animation: breathe 1.4s ease-in-out infinite; }
     @keyframes ring { 0% { transform: scale(1); opacity: .8; } 100% { transform: scale(1.6); opacity: 0; } }
     @keyframes breathe { 50% { transform: scale(1.05); } }
     @keyframes spin-glow { 0%,100% { box-shadow: 0 0 0 4px rgba(139,92,246,.5), 0 0 30px rgba(139,92,246,.4); } 50% { box-shadow: 0 0 0 4px rgba(139,92,246,.9), 0 0 80px rgba(139,92,246,.95); } }
-    @media (prefers-reduced-motion: reduce) { #avatar::before, #avatar::after, #micBtn, #agentName, .dots i { animation: none !important; transition: none !important; } }
+    @media (prefers-reduced-motion: reduce) { #avatar::before, #avatar::after, #micBtn, #agentName, .grad, .dots i { animation: none !important; transition: none !important; } }
 
     /* Voice picker: light pill with dark text, readable on the pale hero and in the native popup (which is always light). */
     .voice { display: inline-flex; align-items: center; gap: 10px; color: #0b1b3a; font-size: .9rem; font-weight: 600; }
@@ -126,13 +130,12 @@
     <div id="wave" aria-hidden="true"></div>
     <div class="hero-top">
       <header>
-        <h1>How can I help you today?</h1>
+        <h1>How can I help you to <span class="grad">Build</span> today?</h1>
         <p>Ask <span id="agentName">Charon</span>, your agent</p>
       </header>
     </div>
     <div class="hero-mid">
       <div id="avatar" data-state="idle">
-        <canvas id="waveViz" aria-hidden="true"></canvas>
         <canvas id="riveCanvas" aria-hidden="true"></canvas>
         <button id="micBtn" aria-label="Start talking">
           <span class="fallback">🎤</span>
@@ -154,7 +157,7 @@
 
   <script src="https://unpkg.com/@rive-app/webgl2@2.44.1/rive.js"></script>
   <script src="gradient-wave.js"></script>
-  <script src="voice-viz.js"></script>
+  <script src="voice-level.js"></script>
   <script src="geminilive.js"></script>
   <script src="mediaUtils.js"></script>
   <script src="tools.js"></script>

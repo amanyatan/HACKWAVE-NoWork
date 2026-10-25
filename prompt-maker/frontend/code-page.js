@@ -16,7 +16,8 @@
   let status = "empty"; // empty | generating | ready | error
   let projects = []; // history, newest first: { id, title, created_at, set_id, local?, files? } (files load when opened)
   let project = null; // the open project (always has files)
-  let dbOk = null; // null = not known yet
+  let dbOk = null; // null = not known yet; reflects only whether the history list could be loaded
+  let dbWhy = "down"; // missing | busy | down, when dbOk is false
   let saveState = "idle"; // idle | saving | saved | error
   let saveTimer = null;
   let request = null; // last generation payload, kept for Retry
@@ -40,16 +41,30 @@
   const indexOrFirst = (p) => (p.files.find((f) => f.path === "index.html") || p.files[0]).path;
 
   /* ---------- history ---------- */
+  /** One try, and one more after a short pause: a single hiccup should not flip the page into "database down". */
+  async function fetchRemote() {
+    const url = `/api/code-projects?client_id=${NW.clientId}`;
+    try {
+      return (await NW.api(url)).projects;
+    } catch (e) {
+      if (NW.dbProblem(e) === "missing") throw e; // retrying cannot create tables
+      await new Promise((r) => setTimeout(r, 1200));
+      return (await NW.api(url)).projects;
+    }
+  }
+
   async function loadHistory() {
     let remote = [];
     try {
-      remote = (await NW.api(`/api/code-projects?client_id=${NW.clientId}`)).projects;
+      remote = await fetchRemote();
       dbOk = true;
-    } catch {
+    } catch (e) {
       dbOk = false;
+      dbWhy = NW.dbProblem(e);
     }
     const loaded = new Map(projects.filter((p) => p.id).map((p) => [p.id, p])); // keep objects that already hold their files
-    const merged = projects.filter((p) => p.local);
+    // If the database could not be reached, keep every project we already have instead of dropping the saved ones from the page.
+    const merged = dbOk ? projects.filter((p) => p.local) : [...projects];
     for (const l of readLocal()) if (!merged.some((m) => m.id === l.id)) merged.push(l);
     for (const r of remote) merged.push(loaded.get(r.id) || r);
     projects = merged.sort(newest);
@@ -221,7 +236,7 @@
           p === project ? h("span", { class: "chip ok" }, "Open now") : h("button", { class: "nb-btn", type: "button", onclick: () => openProject(p) }, "Open")))));
   }
 
-  const dbNote = () => (dbOk === false ? h("p", { class: "note" }, "Code history is saved on this device only because the database is not set up yet (run backend/supabase/schema.sql in Supabase).") : null);
+  const dbNote = () => (dbOk === false ? NW.dbNote(dbWhy, () => NW.pages.code.onShow()) : null);
 
   function emptyView() {
     return shell(

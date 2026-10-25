@@ -51,6 +51,23 @@ NW.api = async (path, { method = "GET", body, timeout = 20000 } = {}) => {
   }
 };
 
+/** Why a history call failed, so the note tells the truth: tables missing, too many requests, or just unreachable. */
+NW.dbProblem = (e) => {
+  if (e && e.status === 429) return "busy";
+  if (e && e.status === 503 && /could not find the table|schema cache|does not exist|relation/i.test(e.message)) return "missing";
+  return "down";
+};
+
+/** The note shown when history could not be loaded, with a button to try again. */
+NW.dbNote = (why, retry) => {
+  const text = {
+    missing: "The database tables are not there yet. Run backend/supabase/schema.sql in the Supabase SQL Editor, then try again.",
+    busy: "Too many requests in a short time. Wait a few seconds, then try again.",
+    down: "Cannot reach the database right now, so only what is saved on this device is shown.",
+  }[why];
+  return NW.h("p", { class: "note" }, text, " ", NW.h("button", { class: "nb-btn", type: "button", style: "min-height:30px;padding:3px 12px;margin-left:6px", onclick: retry }, "Try again"));
+};
+
 /** POST JSON, get a file back (used for .docx and .zip). */
 NW.fetchBlob = async (path, body) => {
   const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });

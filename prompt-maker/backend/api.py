@@ -213,7 +213,7 @@ async def get_code(request):
 
 async def update_code(request):
     """Saves the user's edits. The client_id filter on the update is what keeps one client from touching another's project."""
-    if limited(request, "rw", 120, 60):
+    if limited(request, "edit", 120, 60):  # its own counter: typing must not use up the history endpoints' allowance
         return err(429, "rate limited")
     try:
         data = await body_of(request)
@@ -258,7 +258,7 @@ STORAGE_POLYFILL = (
 
 async def put_preview(request):
     """Stores (or updates) a project in memory and returns its token. Edits from the Code page reuse the same token."""
-    if limited(request, "rw", 120, 60):
+    if limited(request, "preview", 240, 60):  # its own counter: one refresh per typing pause is ~85 a minute
         return err(429, "rate limited")
     try:
         data = await body_of(request)
