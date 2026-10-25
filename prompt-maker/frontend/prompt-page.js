@@ -94,11 +94,12 @@
     syncNew(set).then(() => wantsCode && NW.codeRequested({ setId: set.local ? null : set.id, title: set.title, summary: set.summary, aiTool: set.ai_tool, steps }));
   };
 
-  /** Open the Code page; if no code exists yet (never started, failed, or lost on reload), ask for it from this set's prompts. */
-  function goCode(set) {
-    const st = NW.codeStatus();
-    if (set.wants_code && (st === "empty" || st === "error")) {
-      NW.codeRequested({ setId: set.local ? null : set.id, title: set.title, summary: set.summary, aiTool: set.ai_tool, steps: set.steps });
+  /** Open the Code page. If this set already has a code project, open that; otherwise write it (never twice for one set). */
+  async function goCode(set) {
+    if (set.wants_code && NW.codeStatus() !== "generating") {
+      const existing = await NW.pages.code.projectForSet(set.local ? null : set.id);
+      if (existing) await NW.pages.code.open(existing);
+      else NW.codeRequested({ setId: set.local ? null : set.id, title: set.title, summary: set.summary, aiTool: set.ai_tool, steps: set.steps });
     }
     NW.go("code");
   }

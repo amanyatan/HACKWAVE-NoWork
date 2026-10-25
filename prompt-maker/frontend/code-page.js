@@ -2,16 +2,24 @@
  * Code page: the generated HTML / CSS / JS project. File tabs and an editable editor beside a live preview, a real
  * live URL (http://127.0.0.1:<port>/p/<token>/) that opens in its own tab, and a ZIP download.
  * The live site is served from the other loopback name (localhost <-> 127.0.0.1), so it is a different origin from this app.
+ * Every generated project is kept in History (Supabase, or this browser if the database is down), edits are saved as you
+ * type, and after a refresh the project you had open comes back.
  */
 (function () {
   const { h } = NW;
   const view = document.getElementById("view-code");
-  const CACHE_KEY = "nw_code_project";
+  const LOCAL_KEY = "nw_code_local"; // projects the database could not take; kept in this browser instead
+  const LAST_KEY = "nw_code_last"; // id of the project that was open last
   const HINTS = ["Reading your prompts…", "Planning the screens…", "Writing index.html…", "Styling with style.css…", "Wiring up script.js…", "Checking everything fits together…"];
+  const LOOPBACK = ["localhost", "127.0.0.1"];
 
   let status = "empty"; // empty | generating | ready | error
-  let project = null; // { title, files: [{ path, content }], saved }
-  let request = null; // last payload, kept for Retry
+  let projects = []; // history, newest first: { id, title, created_at, set_id, local?, files? } (files load when opened)
+  let project = null; // the open project (always has files)
+  let dbOk = null; // null = not known yet
+  let saveState = "idle"; // idle | saving | saved | error
+  let saveTimer = null;
+  let request = null; // last generation payload, kept for Retry
   let error = "";
   let activePath = null;
   let hintTimer = null;
@@ -20,12 +28,90 @@
   let liveUrl = "";
   let layout = innerWidth >= 1000 ? "split" : "code"; // code | split | preview
   let el = {}; // editor / preview handles while the project view is on screen
-  const LOOPBACK = ["localhost", "127.0.0.1"];
 
   NW.codeStatus = () => status;
 
-  const cache = () => { try { localStorage.setItem(CACHE_KEY, JSON.stringify(project)); } catch {} };
-  const cached = () => { try { return JSON.parse(localStorage.getItem(CACHE_KEY) || "null"); } catch { return null; } };
+  /* ---------- small storage helpers ---------- */
+  const readLocal = () => { try { return JSON.parse(localStorage.getItem(LOCAL_KEY) || "[]"); } catch { return []; } };
+  const saveLocal = () => { try { localStorage.setItem(LOCAL_KEY, JSON.stringify(projects.filter((p) => p.local && p.files))); } catch {} };
+  const remember = (id) => { try { localStorage.setItem(LAST_KEY, id); } catch {} };
+  const lastId = () => { try { return localStorage.getItem(LAST_KEY); } catch { return null; } };
+  const newest = (a, b) => new Date(b.created_at) - new Date(a.created_at);
+  const indexOrFirst = (p) => (p.files.find((f) => f.path === "index.html") || p.files[0]).path;
+
+  /* ---------- history ---------- */
+  async function loadHistory() {
+    let remote = [];
+    try {
+      remote = (await NW.api(`/api/code-projects?client_id=${NW.clientId}`)).projects;
+      dbOk = true;
+    } catch {
+      dbOk = false;
+    }
+    const loaded = new Map(projects.filter((p) => p.id).map((p) => [p.id, p])); // keep objects that already hold their files
+    const merged = projects.filter((p) => p.local);
+    for (const l of readLocal()) if (!merged.some((m) => m.id === l.id)) merged.push(l);
+    for (const r of remote) merged.push(loaded.get(r.id) || r);
+    projects = merged.sort(newest);
+  }
+
+  /** Make a history entry the open project. Pending edits to the previous one are saved first; files load if needed. */
+  async function openProject(p) {
+    if (!p.files) {
+      try {
+        p.files = (await NW.api(`/api/code-projects/${p.id}?client_id=${NW.clientId}`)).project.files;
+      } catch (e) {
+        alert(`Could not open this project: ${e.message}`);
+        return;
+      }
+    }
+    flushSave();
+    project = p;
+    status = "ready";
+    activePath = indexOrFirst(p);
+    liveToken = null; // every project gets its own live link
+    liveUrl = "";
+    saveState = "idle";
+    remember(p.id);
+    render();
+  }
+
+  /* ---------- saving edits ---------- */
+  async function saveEdits(p) {
+    if (p.local) { saveLocal(); return setSave(p, "saved"); }
+    setSave(p, "saving");
+    try {
+      await NW.api(`/api/code-projects/${p.id}`, { method: "PUT", body: { client_id: NW.clientId, files: p.files } });
+      setSave(p, "saved");
+    } catch {
+      setSave(p, "error");
+    }
+  }
+  function setSave(p, state) {
+    if (p !== project) return; // the user already moved to another project
+    saveState = state;
+    updateSaveChip();
+  }
+  function scheduleSave() {
+    saveState = "saving";
+    updateSaveChip();
+    clearTimeout(saveTimer);
+    const p = project;
+    saveTimer = setTimeout(() => { saveTimer = null; saveEdits(p); }, 1200);
+  }
+  /** Switching project or leaving the page must not drop edits typed in the last second. */
+  function flushSave() {
+    if (!saveTimer || !project) return;
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    saveEdits(project);
+  }
+  window.addEventListener("pagehide", flushSave);
+  function updateSaveChip() {
+    if (!el.saveChip) return;
+    el.saveChip.textContent = saveState === "saving" ? "Saving…" : saveState === "error" ? "Could not save yet. It will retry on your next edit." : project?.local ? "Saved on this device" : "All changes saved";
+    el.saveChip.className = `chip${saveState === "error" ? "" : " ok"}`;
+  }
 
   /* ---------- called when the agent asked for code ---------- */
   NW.codeRequested = (payload) => {
@@ -44,9 +130,16 @@
         timeout: 170000,
         body: { client_id: NW.clientId, set_id: request.setId, title: request.title, summary: request.summary, ai_tool: request.aiTool, steps: request.steps.map(({ title, prompt }) => ({ title, prompt })) },
       });
-      project = { id: r.id, title: r.title, files: r.files, saved: r.saved };
-      activePath = (project.files.find((f) => f.path === "index.html") || project.files[0]).path;
-      cache();
+      flushSave();
+      const p = { id: r.id || `local-${Date.now()}`, local: !r.id, title: r.title, files: r.files, created_at: new Date().toISOString(), set_id: request.setId || null };
+      projects.unshift(p); // a new entry in History
+      if (p.local) saveLocal();
+      project = p;
+      activePath = indexOrFirst(p);
+      liveToken = null;
+      liveUrl = "";
+      saveState = "idle";
+      remember(p.id);
       status = "ready";
       if (NW.route() !== "code") NW.badge("code", true);
     } catch (e) {
@@ -59,7 +152,7 @@
   }
 
   /* ---------- preview ---------- */
-  // Generated apps use localStorage, which a sandboxed iframe (no same-origin) is not allowed to touch, so give it an in-memory one.
+  // Fallback only (when the server cannot publish the live site): a sandboxed iframe cannot use localStorage, so give it an in-memory one.
   const POLYFILL =
     "<script>(function(){function mk(){var m={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null},setItem:function(k,v){m[k]=String(v)},removeItem:function(k){delete m[k]},clear:function(){m={}},key:function(i){return Object.keys(m)[i]||null},get length(){return Object.keys(m).length}}}" +
     "['localStorage','sessionStorage'].forEach(function(n){try{Object.defineProperty(window,n,{value:mk(),configurable:true})}catch(e){}})})()</" + "script>";
@@ -78,11 +171,12 @@
     });
     return /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => m + POLYFILL) : POLYFILL + html;
   }
+
   /** Where the live site lives: the other loopback name, so it can never share an origin (and storage) with this app. */
   function siteOrigin() {
-    const h = location.hostname;
-    if (!LOOPBACK.includes(h)) return location.origin;
-    return `${location.protocol}//${h === "localhost" ? "127.0.0.1" : "localhost"}${location.port ? `:${location.port}` : ""}`;
+    const host = location.hostname;
+    if (!LOOPBACK.includes(host)) return location.origin;
+    return `${location.protocol}//${host === "localhost" ? "127.0.0.1" : "localhost"}${location.port ? `:${location.port}` : ""}`;
   }
 
   /** Publish the current files as the live site and point the preview at it. */
@@ -114,12 +208,24 @@
   }
 
   /* ---------- views ---------- */
-  function shell(...kids) {
-    return h("div", { class: "page-inner" }, ...kids);
+  const shell = (...kids) => h("div", { class: "page-inner" }, ...kids);
+
+  function historyEl() {
+    if (!projects.length) return null;
+    const fmt = (iso) => new Date(iso).toLocaleString();
+    return h("section", { class: "hist" },
+      h("h2", {}, "Your code history"),
+      h("div", { class: "hist-list" }, ...projects.map((p) =>
+        h("div", { class: `hist-item${p === project ? " current" : ""}` },
+          h("div", { class: "meta" }, h("b", {}, p.title), h("small", {}, `${fmt(p.created_at)}${p.local ? " · this device only" : ""}`)),
+          p === project ? h("span", { class: "chip ok" }, "Open now") : h("button", { class: "nb-btn", type: "button", onclick: () => openProject(p) }, "Open")))));
   }
+
+  const dbNote = () => (dbOk === false ? h("p", { class: "note" }, "Code history is saved on this device only because the database is not set up yet (run backend/supabase/schema.sql in Supabase).") : null);
 
   function emptyView() {
     return shell(
+      dbNote(),
       h("h1", {}, "Code"),
       h("p", { class: "lede" }, "Ready-to-run starter code for your idea."),
       h("div", { class: "empty", style: "margin-top:20px" },
@@ -136,7 +242,8 @@
     hintTimer = setInterval(() => { i = (i + 1) % HINTS.length; hint.textContent = HINTS[i]; }, 3500);
     return shell(
       h("h1", {}, request?.title || "Your code"),
-      h("div", { class: "gen" }, h("h2", {}, "Writing your code…"), hint, h("div", { class: "progress-bar" }, h("i")), h("p", {}, "This usually takes under a minute. You can keep downloading prompts meanwhile."))
+      h("div", { class: "gen" }, h("h2", {}, "Writing your code…"), hint, h("div", { class: "progress-bar" }, h("i")), h("p", {}, "This usually takes under a minute. You can keep downloading prompts meanwhile.")),
+      historyEl()
     );
   }
 
@@ -145,7 +252,8 @@
       h("h1", {}, request?.title || "Your code"),
       h("div", { class: "gen" }, h("h2", {}, "Could not write the code"), h("p", { class: "err" }, error), h("div", { class: "pp-actions", style: "justify-content:center;margin-top:16px" },
         request && h("button", { class: "nb-btn primary", type: "button", onclick: generate }, "Try again"),
-        h("a", { class: "nb-btn", href: "#/prompt" }, "Back to prompts")))
+        h("a", { class: "nb-btn", href: "#/prompt" }, "Back to prompts"))),
+      historyEl()
     );
   }
 
@@ -161,7 +269,7 @@
 
     el.code.addEventListener("input", () => {
       fileOf(activePath).content = el.code.value;
-      cache();
+      scheduleSave();
       clearTimeout(runTimer);
       runTimer = setTimeout(runPreview, 700); // the live site follows your edits
     });
@@ -193,22 +301,26 @@
       zip.disabled = false;
     } }, "Download ZIP");
 
-    return shell(
+    el.saveChip = h("span", { class: "chip ok" });
+    const page = shell(
+      dbNote(),
       h("div", { class: "cp-top" },
-        h("div", {}, h("h1", {}, project.title), h("p", { class: "lede" }, "Plain HTML, CSS and JavaScript. Edit any file and the live site updates."),
-          h("div", { class: "pp-chips", style: "margin-top:10px" }, h("span", { class: "chip" }, `${project.files.length} files`), h("span", { class: "chip" }, "No build step"), project.saved && h("span", { class: "chip ok" }, "Saved"))),
-        h("div", { class: "cp-actions" }, zip)
+        h("div", {}, h("h1", {}, project.title), h("p", { class: "lede" }, "Plain HTML, CSS and JavaScript. Edit any file; it is saved and the live site updates."),
+          h("div", { class: "pp-chips", style: "margin-top:10px" }, h("span", { class: "chip" }, `${project.files.length} files`), h("span", { class: "chip" }, "No build step"), el.saveChip)),
+        h("div", { class: "cp-actions" }, h("a", { class: "nb-btn", href: "#/agents" }, "+ New project"), zip)
       ),
       h("div", { class: "live-bar" }, h("label", {}, "Live site"), el.live, el.open, el.copyLink, seg),
-      el.main
+      el.main,
+      historyEl()
     );
+    updateSaveChip();
+    return page;
   }
 
   function render() {
     el = {};
     clearInterval(hintTimer);
-    const page =
-      status === "generating" ? generatingView() : status === "error" ? errorView() : status === "ready" && project ? projectView() : emptyView();
+    const page = status === "generating" ? generatingView() : status === "error" ? errorView() : status === "ready" && project ? projectView() : emptyView();
     view.replaceChildren(page);
     if (status === "ready" && project) {
       openFile(fileOf(activePath) ? activePath : project.files[0].path);
@@ -217,15 +329,18 @@
   }
 
   NW.pages.code = {
+    open: openProject,
+    /** The code project that was written from this prompt set, if any, so the Prompt page never pays for it twice. */
+    async projectForSet(setId) {
+      if (!setId) return null;
+      await loadHistory();
+      return projects.find((p) => p.set_id === setId) || null;
+    },
     async onShow() {
-      if (status === "empty") {
-        // A project from an earlier visit: this browser's cache first, then the database.
-        const c = cached();
-        if (c?.files?.length) project = c;
-        else {
-          try { project = (await NW.api(`/api/code?client_id=${NW.clientId}`)).project; } catch { /* database not ready: nothing to restore */ }
-        }
-        if (project?.files?.length) { status = "ready"; activePath = (project.files.find((f) => f.path === "index.html") || project.files[0]).path; }
+      if (status === "generating") return render(); // keep the progress view; History loads once it is done
+      await loadHistory();
+      if (!project && projects.length) {
+        return openProject(projects.find((p) => p.id === lastId()) || projects[0]); // brings back what was open before the refresh
       }
       render();
     },

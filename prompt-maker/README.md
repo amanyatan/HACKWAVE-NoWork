@@ -10,7 +10,7 @@ Three pages: **Agents** (voice), **Prompt** (roadmap and history), **Code** (sta
 prompt-maker/
 ├── backend/                 Python (aiohttp)
 │   ├── server.py            token endpoint, /api/rag, /api/doc (all rate limited), serves ../frontend
-│   ├── api.py               history (/api/prompt-sets), /api/code, /api/zip, /api/health, live sites (/api/preview, /p/<token>/)
+│   ├── api.py               history (/api/prompt-sets, /api/code-projects), /api/code, /api/zip, /api/health, live sites (/api/preview, /p/<token>/)
 │   ├── db.py                tiny Supabase REST client (service role key, server side only)
 │   ├── codegen.py           writes the HTML/CSS/JS project with a Gemini text model
 │   ├── supabase/schema.sql  tables: run once in the Supabase SQL Editor
@@ -63,3 +63,7 @@ Row level security is on with no policies, so the public (anon) key can read not
 ## Live site for generated code
 
 The Code page publishes the project as a real site at `http://127.0.0.1:<port>/p/<token>/` (kept in server memory, newest 50, lost on restart; press Run on the Code page to recreate it). Open it in a new tab, or copy the link. It is served from the *other* loopback name (`localhost` <-> `127.0.0.1`), so it is a different origin from the app and cannot read the app's storage. On any other host the page is served with a CSP sandbox instead.
+
+## Code history
+
+Every project the agent writes is a row in `code_projects` and shows up under **Your code history** on the Code page. Open any entry to switch to it; edits are saved to the database about a second after you stop typing, and after a refresh the project you had open comes back. If the database is down, projects and edits are kept in this browser instead (marked "this device only"). Endpoints: `GET /api/code-projects` (list), `GET /api/code-projects/<id>` (open), `PUT /api/code-projects/<id>` (save edits). No schema change is needed beyond `schema.sql`.
