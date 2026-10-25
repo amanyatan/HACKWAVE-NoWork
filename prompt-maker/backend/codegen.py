@@ -6,7 +6,7 @@ import re
 
 from google.genai import types
 
-CODE_MODEL = os.environ.get("CODE_MODEL", "gemini-3.8-flash")
+CODE_MODEL = os.environ.get("CODE_MODEL", "gemini-3.5-flash")
 TIMEOUT_S = 150
 MAX_FILES = 12
 MAX_FILE = 120_000
